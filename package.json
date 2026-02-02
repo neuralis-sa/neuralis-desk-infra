@@ -1,0 +1,30 @@
+{
+  "name": "neuralis-desk-infra",
+  "private": true,
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "lint": "turbo run lint",
+    "format": "prettier --write .",
+    "clean": "rimraf dist",
+    "deploy-production": "dotenv -e ./env/production/.env.production -- pnpm run deploy",
+    "deploy": "pnpm run clean && pnpm run download-release && pnpm run migrate-db && pnpm run deploy-static-website && pnpm run deploy-func && pnpm run deploy-config",
+    "download-release": "gh release download $VERSION --repo neuralis-sa/neuralis-desk --dir ./dist && pnpm run untar-frontend && unzip -q ./dist/function-app.zip -d ./dist/function-app",
+    "untar-frontend": "mkdir -p ./dist/frontend-dist &&  tar -xzf ./dist/frontend-dist.tar.gz -C ./dist/frontend-dist",
+    "migrate-db": "prisma migrate deploy --schema=./dist/function-app/prisma/schema.prisma",
+    "deploy-func": "az --version && az functionapp deployment source config-zip -g $RG -n $FUNC_NAME --src ./dist/function-app.zip",
+    "deploy-config": "az functionapp config appsettings set -g $RG -n $FUNC_NAME --slot-settings @$APP_SETTINGS_FILE",
+    "deploy-static-website": "cp $STATIC_WEB_APP_CONFIG ./dist/frontend-dist/staticwebapp.config.json && swa deploy --app-name $STATIC_WEBAPP_NAME --api-location '' --resource-group $RG --app-location ./dist/frontend-dist --env $STATIC_WEBAPP_ENV"
+  },
+  "devDependencies": {
+    "@azure/static-web-apps-cli": "^2.0.6",
+    "rimraf": "^5.0.10",
+    "dotenv-cli": "^8.0.0",
+    "tar": "^7.4.3",
+    "prisma": "^6.7.0"
+  },
+  "packageManager": "pnpm@10.8.1",
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -1,0 +1,85 @@
+name: Provision Infrastructure
+on:
+  push:
+    branches: [main]
+    paths:
+      - "infra/**"
+      - "azure.yaml"
+      - ".azure/**"
+  workflow_dispatch:
+
+env:
+  AZURE_ENV_NAME: neuralis-desk
+  AZURE_LOCATION: "switzerlandnorth"
+  AZURE_SUBSCRIPTION_ID: d2bb70e2-0cfd-4d75-b5a2-169ee1b74203
+  ONEPASSWORD_VAULT: Azure-Infra-Secret
+  ONEPASSWORD_ENV_ITEM: "neuralis-desk-infra"
+jobs:
+  provision-infrastructure:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Azure Developer CLI
+        uses: Azure/setup-azd@v2
+
+      - name: Log in with Azure
+        run: |
+          $info = $Env:AZURE_CREDENTIALS | ConvertFrom-Json -AsHashtable;
+          Write-Host "::add-mask::$($info.clientSecret)"
+          azd auth login `
+            --client-id "$($info.clientId)" `
+            --client-secret "$($info.clientSecret)" `
+            --tenant-id "$($info.tenantId)"
+        shell: pwsh
+        env:
+          AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Configure 1Password CLI
+        uses: 1password/install-cli-action@v1
+
+      - name: Sync .env from 1Password
+        id: load-secrets
+        run: |
+          ENV_REFERENCE="op://${{ env.ONEPASSWORD_VAULT }}/${{ env.ONEPASSWORD_ENV_ITEM }}.provision/notesPlain"
+
+          echo "Syncing .env file from 1Password to .env"
+          echo "Key Vault: ${{ env.KEY_VAULT_NAME }}"
+
+          # Récupérer le fichier .env depuis 1Password
+          # Récupérer le fichier .env depuis 1Password
+          op read "$ENV_REFERENCE" > .env.temp
+
+          # Parser et synchroniser chaque variable
+          while IFS='=' read -r key value; do
+            # Ignorer les lignes vides et les commentaires
+            if [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]]; then
+              continue
+            fi
+            
+            # Nettoyer la clé (supprimer les espaces)
+            key=$(echo "$key" | xargs)
+            
+            # Nettoyer la valeur (supprimer les guillemets si présents)
+            value=$(echo "$value" | sed 's/^["'\'']//' | sed 's/["'\'']$//')
+            
+            echo "Syncing $key -> $secret_name"
+
+            echo "$key=$value" >> $GITHUB_OUTPUT
+
+          done < .env.temp
+
+          # Nettoyer le fichier temporaire
+          rm -f .env.temp
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+
+      - name: Azure Dev Provision
+        run: azd provision --no-prompt
+        env:
+          AZURE_ENV_NAME: ${{ env.AZURE_ENV_NAME }}
+          AZURE_LOCATION: ${{ env.AZURE_LOCATION }}
+          AZURE_SUBSCRIPTION_ID: ${{ env.AZURE_SUBSCRIPTION_ID }}
+          POSTGRESQL_ADMIN_PASSWORD: ${{ steps.load-secrets.outputs.POSTGRESQL_ADMIN_PASSWORD }}
+          AZURE_AUTH_CLIENT_SECRET: ${{ steps.load-secrets.outputs.AZURE_AUTH_CLIENT_SECRET }}
+          AZURE_AUTH_CLIENT_ID: ${{ steps.load-secrets.outputs.AZURE_AUTH_CLIENT_ID }}

@@ -1,0 +1,187 @@
+name: Deploy Azure Function
+on:
+  push:
+    branches: [main]
+    paths:
+      - "env/**"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to deploy to"
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+      sync_env_vars:
+        description: "Sync environment variables from 1Password to Key Vault"
+        required: false
+        type: boolean
+        default: true
+
+env:
+  ONEPASSWORD_VAULT: Azure-Infra-Secret
+  ONEPASSWORD_ENV_ITEM: "neuralis-desk-infra"
+  KEY_VAULT_NAME: kv-neuralis-desk
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Detect changed environment (automatic trigger)
+        if: github.event_name == 'push'
+        id: detect-env-auto
+        run: |
+          # Récupérer les fichiers modifiés dans le dernier commit
+          CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD)
+
+          # Détecter l'environnement modifié
+          if echo "$CHANGED_FILES" | grep -q "^env/production/"; then
+            echo "environment=production" >> $GITHUB_OUTPUT
+            echo "deploy_script=deploy-production" >> $GITHUB_OUTPUT
+            echo "sync_env_vars=true" >> $GITHUB_OUTPUT
+          elif echo "$CHANGED_FILES" | grep -q "^env/staging/"; then
+            echo "environment=staging" >> $GITHUB_OUTPUT
+            echo "deploy_script=deploy-staging" >> $GITHUB_OUTPUT
+            echo "sync_env_vars=true" >> $GITHUB_OUTPUT
+          else
+            echo "environment=none" >> $GITHUB_OUTPUT
+            echo "deploy_script=" >> $GITHUB_OUTPUT
+            echo "sync_env_vars=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set environment for manual trigger
+        if: github.event_name == 'workflow_dispatch'
+        id: detect-env-manual
+        run: |
+          ENVIRONMENT="${{ github.event.inputs.environment }}"
+          echo "environment=$ENVIRONMENT" >> $GITHUB_OUTPUT
+
+          if [ "$ENVIRONMENT" = "production" ]; then
+            echo "deploy_script=deploy-production" >> $GITHUB_OUTPUT
+          elif [ "$ENVIRONMENT" = "staging" ]; then
+            echo "deploy_script=deploy-staging" >> $GITHUB_OUTPUT
+          fi
+
+          echo "sync_env_vars=${{ github.event.inputs.sync_env_vars }}" >> $GITHUB_OUTPUT
+
+      - name: Set final environment variables
+        id: final-env
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "environment=${{ steps.detect-env-manual.outputs.environment }}" >> $GITHUB_OUTPUT
+            echo "deploy_script=${{ steps.detect-env-manual.outputs.deploy_script }}" >> $GITHUB_OUTPUT
+            echo "sync_env_vars=${{ steps.detect-env-manual.outputs.sync_env_vars }}" >> $GITHUB_OUTPUT
+          else
+            echo "environment=${{ steps.detect-env-auto.outputs.environment }}" >> $GITHUB_OUTPUT
+            echo "deploy_script=${{ steps.detect-env-auto.outputs.deploy_script }}" >> $GITHUB_OUTPUT
+            echo "sync_env_vars=${{ steps.detect-env-auto.outputs.sync_env_vars }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Configure 1Password CLI
+        if: steps.final-env.outputs.environment != 'none'
+        uses: 1password/install-cli-action@v1
+
+      - name: Azure Login
+        if: steps.final-env.outputs.environment != 'none'
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Azure CLI script
+        uses: azure/cli@v2
+        with:
+          azcliversion: 2.78.0
+          inlineScript: |
+            az account show
+
+      - name: Sync .env from 1Password to Azure Key Vault
+        if: steps.final-env.outputs.environment != 'none' && steps.final-env.outputs.sync_env_vars == 'true'
+        run: |
+          # Configuration
+          ENVIRONMENT="${{ steps.final-env.outputs.environment }}"
+          ENV_REFERENCE="op://${{ env.ONEPASSWORD_VAULT }}/${{ env.ONEPASSWORD_ENV_ITEM }}.$ENVIRONMENT/notesPlain"
+
+          echo "Syncing .env file from 1Password to Azure Key Vault..."
+          echo "Environment: $ENVIRONMENT"
+          echo "Key Vault: ${{ env.KEY_VAULT_NAME }}"
+
+          # Récupérer le fichier .env depuis 1Password
+          op read "$ENV_REFERENCE" > .env.temp
+
+          # Parser et synchroniser chaque variable
+          while IFS='=' read -r key value; do
+            # Ignorer les lignes vides et les commentaires
+            if [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]]; then
+              continue
+            fi
+            
+            # Nettoyer la clé (supprimer les espaces)
+            key=$(echo "$key" | xargs)
+            
+            # Nettoyer la valeur (supprimer les guillemets si présents)
+            value=$(echo "$value" | sed 's/^["'\'']//' | sed 's/["'\'']$//')
+            
+            # Convertir la clé en format compatible Key Vault (tirets)
+            secret_name=$(echo "$key" | tr '_' '-')
+            
+            echo "Syncing $key -> $secret_name"
+            
+            # Créer/mettre à jour le secret dans Key Vault
+            az keyvault secret set \
+              --vault-name "${{ env.KEY_VAULT_NAME }}" \
+              --name "$secret_name" \
+              --value "$value" \
+              --tags "environment=$ENVIRONMENT" "source=1password" "original-key=$key" \
+              --output none
+              
+          done < .env.temp
+
+          # Nettoyer le fichier temporaire
+          rm -f .env.temp
+
+          echo "✅ Successfully synced .env variables to Azure Key Vault!"
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+
+      - name: Skip environment sync
+        if: steps.final-env.outputs.environment != 'none' && steps.final-env.outputs.sync_env_vars == 'false'
+        run: echo "⏭️ Skipping environment variables sync as requested"
+
+      - name: Retrieve database URL
+        id: retrieve-db-url
+        if: steps.final-env.outputs.environment != 'none'
+        run: |
+          echo "Retrieving database URL from Key Vault"
+          DATABASE_URL=$(az keyvault secret show --name "POSTGRES-CONNECTION-STRING" --vault-name "${{ env.KEY_VAULT_NAME }}" --query value -o tsv)
+          echo "DATABASE_URL=$DATABASE_URL" >> $GITHUB_OUTPUT
+
+      - name: Deploy to detected environment
+        if: steps.final-env.outputs.environment != 'none'
+        run: |
+          echo "Deploying to environment: ${{ steps.final-env.outputs.environment }}"
+          pnpm run ${{ steps.final-env.outputs.deploy_script }}
+        env:
+          ENVIRONMENT: ${{ steps.final-env.outputs.environment }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          #SWA_CLI_DEPLOYMENT_TOKEN: ${{ secrets.SWA_CLI_DEPLOYMENT_TOKEN }}
+          DATABASE_URL: ${{ steps.retrieve-db-url.outputs.DATABASE_URL }}
+
+      - name: No deployment needed
+        if: steps.final-env.outputs.environment == 'none'
+        run: echo "No environment-specific changes detected. Skipping deployment."

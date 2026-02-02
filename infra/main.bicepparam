@@ -15,3 +15,4 @@ param postgresAdminPassword = readEnvironmentVariable('POSTGRESQL_ADMIN_PASSWORD
 param clientId = readEnvironmentVariable('AZURE_AUTH_CLIENT_ID', '')
 
 param clientSecret = readEnvironmentVariable('AZURE_AUTH_CLIENT_SECRET', '')
+

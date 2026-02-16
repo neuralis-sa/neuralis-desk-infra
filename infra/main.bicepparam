@@ -2,7 +2,7 @@ using './main.bicep'
 
 param environmentName = readEnvironmentVariable('AZURE_ENV_NAME', 'env_name')
 
-param resourceToken = 'neuralis-desk'
+param resourceToken = readEnvironmentVariable('AZURE_RESOURCE_TOKEN', 'neuralis-desk')
 
 param location = readEnvironmentVariable('AZURE_LOCATION', 'location')
 

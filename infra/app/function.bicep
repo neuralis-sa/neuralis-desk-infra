@@ -3,7 +3,7 @@ param location string = ''
 param storageAccountName string = ''
 param tags object = {}
 param runtimeName string = 'node'
-param runtimeVersion string = 'Node|20'
+param runtimeVersion string = 'Node|22'
 param keyVaultName string = ''
 param authType string = 'system'
 

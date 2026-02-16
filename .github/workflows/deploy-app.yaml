@@ -13,16 +13,10 @@ on:
         options:
           - staging
           - production
-      sync_env_vars:
-        description: "Sync environment variables from 1Password to Key Vault"
-        required: false
-        type: boolean
-        default: true
 
 env:
   ONEPASSWORD_VAULT: Azure-Infra-Secret
   ONEPASSWORD_ENV_ITEM: "neuralis-desk-infra"
-  KEY_VAULT_NAME: kv-neuralis-desk
 
 jobs:
   deploy:
@@ -74,11 +68,13 @@ jobs:
 
           if [ "$ENVIRONMENT" = "production" ]; then
             echo "deploy_script=deploy-production" >> $GITHUB_OUTPUT
+            echo "environment=production" >> $GITHUB_OUTPUT
           elif [ "$ENVIRONMENT" = "staging" ]; then
             echo "deploy_script=deploy-staging" >> $GITHUB_OUTPUT
+            echo "environment=staging" >> $GITHUB_OUTPUT
           fi
 
-          echo "sync_env_vars=${{ github.event.inputs.sync_env_vars }}" >> $GITHUB_OUTPUT
+          echo "sync_env_vars=true" >> $GITHUB_OUTPUT
 
       - name: Set final environment variables
         id: final-env
@@ -97,32 +93,16 @@ jobs:
         if: steps.final-env.outputs.environment != 'none'
         uses: 1password/install-cli-action@v1
 
-      - name: Azure Login
+      - name: Sync azure credentials from 1Password
         if: steps.final-env.outputs.environment != 'none'
-        uses: azure/login@v2
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
-
-      - name: Azure CLI script
-        uses: azure/cli@v2
-        with:
-          azcliversion: 2.78.0
-          inlineScript: |
-            az account show
-
-      - name: Sync .env from 1Password to Azure Key Vault
-        if: steps.final-env.outputs.environment != 'none' && steps.final-env.outputs.sync_env_vars == 'true'
+        id: load-azure-creds
         run: |
-          # Configuration
-          ENVIRONMENT="${{ steps.final-env.outputs.environment }}"
-          ENV_REFERENCE="op://${{ env.ONEPASSWORD_VAULT }}/${{ env.ONEPASSWORD_ENV_ITEM }}.$ENVIRONMENT/notesPlain"
+          ENV_REFERENCE="op://${{ env.ONEPASSWORD_VAULT }}/${{ env.ONEPASSWORD_ENV_ITEM }}.${{ steps.final-env.outputs.environment }}.azure/notesPlain"
 
-          echo "Syncing .env file from 1Password to Azure Key Vault..."
-          echo "Environment: $ENVIRONMENT"
-          echo "Key Vault: ${{ env.KEY_VAULT_NAME }}"
+          echo "Syncing azure credentials from 1Password"
 
-          # Récupérer le fichier .env depuis 1Password
-          op read "$ENV_REFERENCE" > .env.temp
+          # Récupérer le fichier depuis 1Password
+          op read "$ENV_REFERENCE" > .azure-env.temp
 
           # Parser et synchroniser chaque variable
           while IFS='=' read -r key value; do
@@ -137,6 +117,69 @@ jobs:
             # Nettoyer la valeur (supprimer les guillemets si présents)
             value=$(echo "$value" | sed 's/^["'\'']//' | sed 's/["'\'']$//')
             
+            echo "Syncing $key"
+
+            echo "$key=$value" >> $GITHUB_OUTPUT
+
+          done < .azure-env.temp
+
+          # Nettoyer le fichier temporaire
+          rm -f .azure-env.temp
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+
+      - name: Azure Login
+        if: steps.final-env.outputs.environment != 'none'
+        uses: azure/login@v2
+        with:
+          creds: '{"clientId":"${{ steps.load-azure-creds.outputs.AZURE_CLIENT_ID }}","clientSecret":"${{ steps.load-azure-creds.outputs.AZURE_CLIENT_SECRET }}","subscriptionId":"${{ steps.load-azure-creds.outputs.AZURE_SUBSCRIPTION_ID }}","tenantId":"${{ steps.load-azure-creds.outputs.AZURE_TENANT_ID }}"}'
+
+      - name: Azure CLI script
+        uses: azure/cli@v2
+        with:
+          azcliversion: 2.78.0
+          inlineScript: |
+            az account show
+
+      - name: Sync .env from 1Password to Azure Key Vault
+        id: sync-env
+        if: steps.final-env.outputs.environment != 'none' && steps.final-env.outputs.sync_env_vars == 'true'
+        run: |
+          # Configuration
+          ENVIRONMENT="${{ steps.final-env.outputs.environment }}"
+          ENV_REFERENCE="op://${{ env.ONEPASSWORD_VAULT }}/${{ env.ONEPASSWORD_ENV_ITEM }}.$ENVIRONMENT.deploy/notesPlain"
+
+          echo "Syncing .env file from 1Password to Azure Key Vault..."
+          echo "Environment: $ENVIRONMENT"
+
+          # Récupérer le fichier .env depuis 1Password
+          op read "$ENV_REFERENCE" > .env.temp
+
+          # Parser et synchroniser chaque variable
+          while IFS='=' read -r key value; do
+            # Ignorer les lignes vides et les commentaires
+            if [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]]; then
+              continue
+            fi
+            
+            # Nettoyer la clé (supprimer les espaces)
+            key=$(echo "$key" | xargs)
+
+            if [[ "$key" == "KEY_VAULT_NAME" ]]; then
+              KEY_VAULT_NAME="$value"
+              echo "Key Vault name set to: $KEY_VAULT_NAME"
+              echo "KEY_VAULT_NAME=$value" >> $GITHUB_OUTPUT
+              continue
+            fi 
+
+            if [ -z "$KEY_VAULT_NAME" ]; then
+              echo "Error: KEY_VAULT_NAME must be defined in the .env file before other variables"
+              exit 1
+            fi
+            
+            # Nettoyer la valeur (supprimer les guillemets si présents)
+            value=$(echo "$value" | sed 's/^["'\'']//' | sed 's/["'\'']$//')
+            
             # Convertir la clé en format compatible Key Vault (tirets)
             secret_name=$(echo "$key" | tr '_' '-')
             
@@ -144,11 +187,13 @@ jobs:
             
             # Créer/mettre à jour le secret dans Key Vault
             az keyvault secret set \
-              --vault-name "${{ env.KEY_VAULT_NAME }}" \
+              --vault-name "$KEY_VAULT_NAME" \
               --name "$secret_name" \
               --value "$value" \
               --tags "environment=$ENVIRONMENT" "source=1password" "original-key=$key" \
               --output none
+
+            echo "$key synced to Key Vault as $secret_name"
               
           done < .env.temp
 
@@ -168,7 +213,7 @@ jobs:
         if: steps.final-env.outputs.environment != 'none'
         run: |
           echo "Retrieving database URL from Key Vault"
-          DATABASE_URL=$(az keyvault secret show --name "POSTGRES-CONNECTION-STRING" --vault-name "${{ env.KEY_VAULT_NAME }}" --query value -o tsv)
+          DATABASE_URL=$(az keyvault secret show --name "POSTGRES-CONNECTION-STRING" --vault-name "${{ steps.sync-env.outputs.KEY_VAULT_NAME }}" --query value -o tsv)
           echo "DATABASE_URL=$DATABASE_URL" >> $GITHUB_OUTPUT
 
       - name: Deploy to detected environment
@@ -177,9 +222,7 @@ jobs:
           echo "Deploying to environment: ${{ steps.final-env.outputs.environment }}"
           pnpm run ${{ steps.final-env.outputs.deploy_script }}
         env:
-          ENVIRONMENT: ${{ steps.final-env.outputs.environment }}
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
-          #SWA_CLI_DEPLOYMENT_TOKEN: ${{ secrets.SWA_CLI_DEPLOYMENT_TOKEN }}
           DATABASE_URL: ${{ steps.retrieve-db-url.outputs.DATABASE_URL }}
 
       - name: No deployment needed

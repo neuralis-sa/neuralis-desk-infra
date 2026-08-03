@@ -34,16 +34,16 @@ param azureOpenAIResourceName string = 'openai-${resourceToken}'
 param azureOpenAISkuName string = 'S0'
 
 @description('Azure OpenAI Model Deployment Name')
-param azureOpenAIModel string = 'o4-mini'
+param azureOpenAIModel string = 'gpt-5-mini'
 @description('Azure OpenAI Model Name')
-param azureOpenAIModelName string = 'o4-mini'
-param azureOpenAIModelVersion string = '2025-04-16'
+param azureOpenAIModelName string = 'gpt-5-mini'
+param azureOpenAIModelVersion string = '2025-08-07'
 
 @description('Azure OpenAI Turbo Model Deployment Name')
-param azureOpenAITurboModel string = 'gpt-4.1-mini'
+param azureOpenAITurboModel string = 'gpt-5-nano'
 @description('Azure OpenAI Model Name')
-param azureOpenAITurboModelName string = 'gpt-4.1-mini'
-param azureOpenAITurboModelVersion string = '2025-04-14'
+param azureOpenAITurboModelName string = 'gpt-5-nano'
+param azureOpenAITurboModelVersion string = '2025-08-07'
 
 //Form recognition
 @description('Azure Form Recognizer Name')

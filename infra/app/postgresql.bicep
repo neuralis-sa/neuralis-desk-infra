@@ -17,6 +17,9 @@ param administratorLoginPassword string
 @description('Database name')
 param databaseName string
 
+@description('Schema the application and its migrations live in. Must match the DATABASE_SCHEMA app setting, otherwise migrations land in `public` while the app reads elsewhere.')
+param schemaName string = 'neuralis-desk'
+
 @description('PostgreSQL version')
 @allowed(['11', '12', '13', '14', '15', '16'])
 param version string = '16'
@@ -90,4 +93,7 @@ output postgresServerFqdn string = postgresServer.properties.fullyQualifiedDomai
 output databaseName string = database.name
 output administratorLogin string = administratorLogin
 output postgresId string = postgresServer.id
-output postgresConnectionString string = 'postgresql://${administratorLogin}:${administratorLoginPassword}@${postgresServer.properties.fullyQualifiedDomainName}:5432/${databaseName}?connection_limit=1'
+// Mirrors the Cosmos cluster's connection string so migrations and the app agree on the schema:
+// the migration SQL is unqualified, so the target schema comes from this URL. Flexible Server has
+// require_secure_transport enabled, hence sslmode=require.
+output postgresConnectionString string = 'postgresql://${administratorLogin}:${administratorLoginPassword}@${postgresServer.properties.fullyQualifiedDomainName}:5432/${databaseName}?uselibpqcompat=true&sslmode=require&schema=${schemaName}'

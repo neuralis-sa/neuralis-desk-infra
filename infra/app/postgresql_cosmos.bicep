@@ -21,6 +21,9 @@ param nodeCount int = 0
 @description('Database name')
 param databaseName string
 
+@description('Schéma de la base de données')
+param schemaName string
+
 
 resource cosmosPgCluster 'Microsoft.DBforPostgreSQL/serverGroupsv2@2023-03-02-preview' = {
   name: name
@@ -48,5 +51,5 @@ resource firewallRule 'Microsoft.DBforPostgreSQL/serverGroupsv2/firewallRules@20
 
 output clusterName string = cosmosPgCluster.name
 output clusterId string = cosmosPgCluster.id
-output connectionPoolerString string = 'postgresql://citus:${administratorLoginPassword}@${cosmosPgCluster.properties.serverNames[0].fullyQualifiedDomainName}:6432/${databaseName}?pgbouncer=true&uselibpqcompat=true&sslmode=require&schema=neuralis-desk'
-output connectionString string = 'postgresql://citus:${administratorLoginPassword}@${cosmosPgCluster.properties.serverNames[0].fullyQualifiedDomainName}:5432/${databaseName}?uselibpqcompat=true&sslmode=require&schema=neuralis-desk'
+output connectionPoolerString string = 'postgresql://citus:${administratorLoginPassword}@${cosmosPgCluster.properties.serverNames[0].fullyQualifiedDomainName}:6432/${databaseName}?pgbouncer=true&uselibpqcompat=true&sslmode=require&schema=${schemaName}'
+output connectionString string = 'postgresql://citus:${administratorLoginPassword}@${cosmosPgCluster.properties.serverNames[0].fullyQualifiedDomainName}:5432/${databaseName}?uselibpqcompat=true&sslmode=require&schema=${schemaName}'

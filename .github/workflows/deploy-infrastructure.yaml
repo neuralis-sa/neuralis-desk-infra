@@ -102,6 +102,9 @@ jobs:
             echo "Syncing $key -> $secret_name"
 
             echo "$key=$value" >> $GITHUB_OUTPUT
+            # Also export to the job environment so main.bicepparam's readEnvironmentVariable()
+            # picks up any new parameter without needing an entry in the step's env: block.
+            echo "$key=$value" >> $GITHUB_ENV
 
           done < .env.temp
 

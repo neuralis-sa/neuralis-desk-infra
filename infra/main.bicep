@@ -59,16 +59,26 @@ param staticWebAppName string = 'stapp-${resourceToken}'
 @description('Name of the Static Web App')
 param webPubSubAppName string = 'webpubsub-${resourceToken}'
 
-// Resource tokens of environments provisioned before the constraints below existed. They keep
-// their original topology; every other environment gets the only one still provisionable.
-var legacyTopologyTokens = ['neuralis-desk']
-var isLegacyTopology = contains(legacyTopologyTokens, resourceToken)
+@secure()
+@description('Optional: Existing WebPubSub connection string. If provided, no new instance will be created.')
+param webPubSubConnectionString string = ''
 
 @description('PostgreSQL Flexible Server name')
 param postgresServerName string = 'pg-${resourceToken}'
 
 @description('PostgreSQL database name')
 param postgresDatabaseName string = 'neuralis-desk'
+
+@description('Schema the app and its migrations live in. Defaults to the production schema so an environment that omits it cannot end up with an empty `schema=` in its connection string.')
+param postgresDatabaseSchema string = 'neuralis-desk'
+
+@secure()
+@description('Optional: Existing PostgreSQL pooler connection string. If provided, no new instance will be created.')
+param postgresPoolerConnectionStringParam string = ''
+
+@secure()
+@description('Optional: Existing PostgreSQL connection string. If provided, no new instance will be created.')
+param postgresConnectionStringParam string = ''
 
 @secure()
 @description('PostgreSQL administrator password')
@@ -91,13 +101,10 @@ param logLevel string = 'INFO'
 
 var tags = { 'azd-env-name': environmentName }
 
-// Cosmos DB for PostgreSQL no longer accepts new clusters, so only pre-existing environments
-// can still be on it.
-var useFlexiblePostgres = !isLegacyTopology
-
-// The Web PubSub free tier is capped at 5 instances per region and the default region is full,
-// so new environments go to a region that still has quota.
-var resolvedWebPubSubLocation = isLegacyTopology ? location : 'westeurope'
+// Only used when this environment creates its own instance. The free tier is capped at 5 per region
+// and the default region is already full, so a new instance needs a region with quota left.
+param webPubSubLocation string = ''
+var resolvedWebPubSubLocation = !empty(webPubSubLocation) ? webPubSubLocation : location
 
 param githubUserPrincipalId string = '2f64aaa1-ba64-4793-94cb-802b125a25af'
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -190,7 +197,8 @@ module documentIntelligence 'core/ai/cognitiveservices.bicep' = {
   }
 }
 
-module webPubSub './app/webPubSub.bicep' = {
+// Deploy WebPubSub only if connection string is not provided
+module webPubSub './app/webPubSub.bicep' = if (empty(webPubSubConnectionString)) {
   name: webPubSubAppName
   scope: rg
   params: {
@@ -200,14 +208,15 @@ module webPubSub './app/webPubSub.bicep' = {
   }
 }
 
-// Store PostgreSQL credentials in Key Vault
 module webPubSubConnectionSringSecret './core/security/keyvault-secret.bicep' = {
   name: 'webPubSub-connection-string'
   scope: rg
   params: {
     keyVaultName: keyVaultName
     name: 'WEBPUBSUB-CONNECTION-STRING'
-    secretValue: webPubSub.outputs.webPuSubConnectionString
+    secretValue: empty(webPubSubConnectionString)
+      ? webPubSub.outputs.webPuSubConnectionString
+      : webPubSubConnectionString
   }
 }
 
@@ -231,7 +240,8 @@ module webPubSubConnectionSringSecret './core/security/keyvault-secret.bicep' = 
 //     highAvailabilityMode: 'Disabled'  // Use 'ZoneRedundant' for production
 //   }
 // }
-module postgresql './app/postgresql_cosmos.bicep' = if (!useFlexiblePostgres) {
+// Deploy PostgreSQL only if connection strings are not provided
+module postgresql './app/postgresql_cosmos.bicep' = if (empty(postgresPoolerConnectionStringParam) && empty(postgresConnectionStringParam)) {
   name: postgresServerName
   scope: rg
   params: {
@@ -240,26 +250,7 @@ module postgresql './app/postgresql_cosmos.bicep' = if (!useFlexiblePostgres) {
     tags: tags
     administratorLoginPassword: postgresAdminPassword
     databaseName: postgresDatabaseName
-  }
-}
-
-// Cosmos DB for PostgreSQL can no longer be provisioned, so new environments get a Flexible Server.
-// Burstable has no built-in PgBouncer, so the pooler secret below reuses the direct connection string.
-module postgresqlFlexible './app/postgresql.bicep' = if (useFlexiblePostgres) {
-  name: '${postgresServerName}-flexible'
-  scope: rg
-  params: {
-    name: postgresServerName
-    location: location
-    tags: tags
-    administratorLoginPassword: postgresAdminPassword
-    databaseName: postgresDatabaseName
-    version: '16'
-    tier: 'Burstable'
-    skuName: 'Standard_B1ms'
-    storageSizeGB: 32
-    backupRetentionDays: 7
-    highAvailabilityMode: 'Disabled'
+    schemaName: postgresDatabaseSchema
   }
 }
 
@@ -270,9 +261,9 @@ module postgresPoolerConnectionString './core/security/keyvault-secret.bicep' = 
   params: {
     keyVaultName: keyVaultName
     name: 'POSTGRES-POOLER-CONNECTION-STRING'
-    secretValue: useFlexiblePostgres
-      ? postgresqlFlexible.outputs.postgresConnectionString
-      : postgresql.outputs.connectionPoolerString
+    secretValue: empty(postgresPoolerConnectionStringParam)
+      ? postgresql.outputs.connectionPoolerString
+      : postgresPoolerConnectionStringParam
   }
 }
 
@@ -282,9 +273,9 @@ module postgresConnectionString './core/security/keyvault-secret.bicep' = {
   params: {
     keyVaultName: keyVaultName
     name: 'POSTGRES-CONNECTION-STRING'
-    secretValue: useFlexiblePostgres
-      ? postgresqlFlexible.outputs.postgresConnectionString
-      : postgresql.outputs.connectionString
+    secretValue: empty(postgresConnectionStringParam)
+      ? postgresql.outputs.connectionString
+      : postgresConnectionStringParam
   }
 }
 

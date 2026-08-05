@@ -34,16 +34,16 @@ param azureOpenAIResourceName string = 'openai-${resourceToken}'
 param azureOpenAISkuName string = 'S0'
 
 @description('Azure OpenAI Model Deployment Name')
-param azureOpenAIModel string = 'o4-mini'
+param azureOpenAIModel string = 'gpt-5-mini'
 @description('Azure OpenAI Model Name')
-param azureOpenAIModelName string = 'o4-mini'
-param azureOpenAIModelVersion string = '2025-04-16'
+param azureOpenAIModelName string = 'gpt-5-mini'
+param azureOpenAIModelVersion string = '2025-08-07'
 
 @description('Azure OpenAI Turbo Model Deployment Name')
-param azureOpenAITurboModel string = 'gpt-4.1-mini'
+param azureOpenAITurboModel string = 'gpt-5-nano'
 @description('Azure OpenAI Model Name')
-param azureOpenAITurboModelName string = 'gpt-4.1-mini'
-param azureOpenAITurboModelVersion string = '2025-04-14'
+param azureOpenAITurboModelName string = 'gpt-5-nano'
+param azureOpenAITurboModelVersion string = '2025-08-07'
 
 //Form recognition
 @description('Azure Form Recognizer Name')
@@ -58,6 +58,11 @@ param staticWebAppName string = 'stapp-${resourceToken}'
 
 @description('Name of the Static Web App')
 param webPubSubAppName string = 'webpubsub-${resourceToken}'
+
+// Resource tokens of environments provisioned before the constraints below existed. They keep
+// their original topology; every other environment gets the only one still provisionable.
+var legacyTopologyTokens = ['neuralis-desk']
+var isLegacyTopology = contains(legacyTopologyTokens, resourceToken)
 
 @description('PostgreSQL Flexible Server name')
 param postgresServerName string = 'pg-${resourceToken}'
@@ -85,6 +90,14 @@ param clientSecret string
 param logLevel string = 'INFO'
 
 var tags = { 'azd-env-name': environmentName }
+
+// Cosmos DB for PostgreSQL no longer accepts new clusters, so only pre-existing environments
+// can still be on it.
+var useFlexiblePostgres = !isLegacyTopology
+
+// The Web PubSub free tier is capped at 5 instances per region and the default region is full,
+// so new environments go to a region that still has quota.
+var resolvedWebPubSubLocation = isLegacyTopology ? location : 'westeurope'
 
 param githubUserPrincipalId string = '2f64aaa1-ba64-4793-94cb-802b125a25af'
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -182,7 +195,7 @@ module webPubSub './app/webPubSub.bicep' = {
   scope: rg
   params: {
     name: webPubSubAppName
-    location: location
+    location: resolvedWebPubSubLocation
     tags: tags
   }
 }
@@ -218,7 +231,7 @@ module webPubSubConnectionSringSecret './core/security/keyvault-secret.bicep' = 
 //     highAvailabilityMode: 'Disabled'  // Use 'ZoneRedundant' for production
 //   }
 // }
-module postgresql './app/postgresql_cosmos.bicep' = {
+module postgresql './app/postgresql_cosmos.bicep' = if (!useFlexiblePostgres) {
   name: postgresServerName
   scope: rg
   params: {
@@ -229,6 +242,27 @@ module postgresql './app/postgresql_cosmos.bicep' = {
     databaseName: postgresDatabaseName
   }
 }
+
+// Cosmos DB for PostgreSQL can no longer be provisioned, so new environments get a Flexible Server.
+// Burstable has no built-in PgBouncer, so the pooler secret below reuses the direct connection string.
+module postgresqlFlexible './app/postgresql.bicep' = if (useFlexiblePostgres) {
+  name: '${postgresServerName}-flexible'
+  scope: rg
+  params: {
+    name: postgresServerName
+    location: location
+    tags: tags
+    administratorLoginPassword: postgresAdminPassword
+    databaseName: postgresDatabaseName
+    version: '16'
+    tier: 'Burstable'
+    skuName: 'Standard_B1ms'
+    storageSizeGB: 32
+    backupRetentionDays: 7
+    highAvailabilityMode: 'Disabled'
+  }
+}
+
 // Store PostgreSQL credentials in Key Vault
 module postgresPoolerConnectionString './core/security/keyvault-secret.bicep' = {
   name: 'postgres-pooler-connection-string'
@@ -236,7 +270,9 @@ module postgresPoolerConnectionString './core/security/keyvault-secret.bicep' = 
   params: {
     keyVaultName: keyVaultName
     name: 'POSTGRES-POOLER-CONNECTION-STRING'
-    secretValue: postgresql.outputs.connectionPoolerString
+    secretValue: useFlexiblePostgres
+      ? postgresqlFlexible.outputs.postgresConnectionString
+      : postgresql.outputs.connectionPoolerString
   }
 }
 
@@ -246,7 +282,9 @@ module postgresConnectionString './core/security/keyvault-secret.bicep' = {
   params: {
     keyVaultName: keyVaultName
     name: 'POSTGRES-CONNECTION-STRING'
-    secretValue: postgresql.outputs.connectionString
+    secretValue: useFlexiblePostgres
+      ? postgresqlFlexible.outputs.postgresConnectionString
+      : postgresql.outputs.connectionString
   }
 }
 

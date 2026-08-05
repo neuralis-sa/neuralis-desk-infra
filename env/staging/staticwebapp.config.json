@@ -1,0 +1,31 @@
+{
+  "navigationFallback": {
+    "rewrite": "/index.html"
+  },
+  "routes": [
+    {
+      "route": "/api/public/*",
+      "allowedRoles": ["anonymous"]
+    },
+    {
+      "route": "/api/*",
+      "allowedRoles": ["authenticated"]
+    },
+    {
+      "route": "/*",
+      "allowedRoles": ["anonymous"]
+    }
+  ],
+  "auth": {
+    "rolesSource": "/api/roles-extractor",
+    "identityProviders": {
+      "azureActiveDirectory": {
+        "registration": {
+          "openIdIssuer": "https://login.microsoftonline.com/8748b97a-64aa-4aa2-b86d-febbbcf1132c/v2.0",
+          "clientIdSettingName": "AZURE_AUTH_CLIENT_ID",
+          "clientSecretSettingName": "AZURE_AUTH_CLIENT_SECRET"
+        }
+      }
+    }
+  }
+}

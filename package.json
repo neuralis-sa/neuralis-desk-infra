@@ -12,7 +12,7 @@
     "deploy": "pnpm run clean && pnpm run download-release && pnpm run migrate-db && pnpm run deploy-static-website && pnpm run deploy-func && pnpm run deploy-config",
     "download-release": "gh release download $VERSION --repo neuralis-sa/neuralis-desk --dir ./dist && pnpm run untar-frontend && unzip -q ./dist/function-app.zip -d ./dist/function-app",
     "untar-frontend": "mkdir -p ./dist/frontend-dist &&  tar -xzf ./dist/frontend-dist.tar.gz -C ./dist/frontend-dist",
-    "migrate-db": "prisma migrate deploy --schema=./dist/function-app/prisma/schema.prisma",
+    "migrate-db": "prisma migrate deploy --schema=./dist/function-app/prisma/schema.prisma --config=./dist/function-app/prisma/prisma.config.ts",
     "deploy-func": "az --version && az functionapp deployment source config-zip -g $RG -n $FUNC_NAME --src ./dist/function-app.zip",
     "deploy-config": "az functionapp config appsettings set -g $RG -n $FUNC_NAME --slot-settings @$APP_SETTINGS_FILE",
     "deploy-static-website": "cp $STATIC_WEB_APP_CONFIG ./dist/frontend-dist/staticwebapp.config.json && swa deploy --app-name $STATIC_WEBAPP_NAME --api-location '' --resource-group $RG --app-location ./dist/frontend-dist --env $STATIC_WEBAPP_ENV"

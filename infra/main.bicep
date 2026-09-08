@@ -49,6 +49,16 @@ param azureOpenAITurboModelVersion string = '2025-08-07'
 @description('Azure Form Recognizer Name')
 param documentIntelligenceName string = 'document-ai-${resourceToken}'
 
+//Speech (3CX call transcription)
+@description('Azure AI Speech name. Batch transcription of the archived 3CX call recordings.')
+param speechServiceName string = 'speech-${resourceToken}'
+
+@description('Container the call audio is staged in while Azure Speech reads it. Must match AZURE_TRANSCRIPTION_CONTAINER.')
+param transcriptionStagingContainerName string = 'call-transcription-staging'
+
+@description('Days after which a staged call audio is deleted even if the collect timer never claimed it.')
+param transcriptionStagingRetentionDays int = 7
+
 //function app name
 @description('Name of the Function App')
 param functionAppName string = 'func-${resourceToken}'
@@ -138,10 +148,42 @@ module storage 'core/storage/storage-account.bicep' = {
     }
     deleteRetentionPolicy: {}
     containers: [
-     
+      {
+        // Transit only: the app uploads a call's WAV here, hands Azure Speech a
+        // 48h read SAS, and deletes the blob once the text is collected. Never
+        // public — a SAS is the only way in.
+        name: transcriptionStagingContainerName
+        publicAccess: 'None'
+      }
     ]
     queues: [
      
+    ]
+    managementPolicyRules: [
+      {
+        // Safety net for the blobs a failed run never unstaged: without it the
+        // container slowly becomes a second, unconsented archive of client calls.
+        enabled: true
+        name: 'expire-transcription-staging'
+        type: 'Lifecycle'
+        definition: {
+          filters: {
+            blobTypes: [
+              'blockBlob'
+            ]
+            prefixMatch: [
+              '${transcriptionStagingContainerName}/'
+            ]
+          }
+          actions: {
+            baseBlob: {
+              delete: {
+                daysAfterModificationGreaterThan: transcriptionStagingRetentionDays
+              }
+            }
+          }
+        }
+      }
     ]
   }
 }
@@ -194,6 +236,20 @@ module documentIntelligence 'core/ai/cognitiveservices.bicep' = {
     location: location
     tags: tags
     kind: 'FormRecognizer'
+  }
+}
+
+// Deliberately on `location` (Switzerland North) and not `aiLocation`: this one
+// processes recorded conversations with clients, so the audio stays in the same
+// region as the storage account that stages it.
+module speech 'core/ai/cognitiveservices.bicep' = {
+  name: speechServiceName
+  scope: rg
+  params: {
+    name: speechServiceName
+    location: location
+    tags: tags
+    kind: 'SpeechServices'
   }
 }
 
@@ -287,6 +343,7 @@ module storekeys './app/storekeys.bicep' = {
     storageAccountName : storage.outputs.name
     azureOpenAIName: openai_datazone.outputs.name
     documentIntelligenceName: documentIntelligence.outputs.name
+    speechServiceName: speech.outputs.name
     rgName: rgName
   }
 }
@@ -320,6 +377,10 @@ module function './app/function.bicep' = {
       'AZURE_OPENAPI_ENDPOINT': openai_datazone.outputs.endpoint
       'AZURE_OPENAPI_DEPLOYMENT_NAME': azureOpenAIModelName
       'AZURE_OPENAPI_TURBO_DEPLOYMENT_NAME': azureOpenAITurboModelName
+      'AZURE_SPEECH_ENDPOINT': speech.outputs.endpoint
+      'AZURE_SPEECH_KEY': '@Microsoft.KeyVault(SecretUri=${storekeys.outputs.SPEECH_KEY_SECRET_URI})'
+      'AZURE_TRANSCRIPTION_STORAGE': '@Microsoft.KeyVault(SecretUri=${storekeys.outputs.TRANSCRIPTION_STORAGE_SECRET_URI})'
+      'AZURE_TRANSCRIPTION_CONTAINER': transcriptionStagingContainerName
       'DATABASE_URL': '@Microsoft.KeyVault(SecretUri=${postgresPoolerConnectionString.outputs.secretUri})'
       'WebPubSubConnectionString' : '@Microsoft.KeyVault(SecretUri=${webPubSubConnectionSringSecret.outputs.secretUri})'
     }
@@ -353,6 +414,8 @@ output AZURE_RESOURCE_GROUP string = rgName
 output LOGLEVEL string = logLevel
 
 output AZURE_BLOB_ACCOUNT_NAME string = storageAccountName
+output AZURE_SPEECH_ENDPOINT string = speech.outputs.endpoint
+output AZURE_TRANSCRIPTION_CONTAINER string = transcriptionStagingContainerName
 
 // Add outputs for frontend integration
 output STATIC_WEB_APP_URL string = staticWebApp.outputs.staticWebAppUrl

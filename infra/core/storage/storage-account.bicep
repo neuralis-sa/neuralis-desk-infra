@@ -13,6 +13,8 @@ param allowCrossTenantReplication bool = true
 param allowSharedKeyAccess bool = true
 param containers array = []
 param fileShares array = []  // Nouveau paramètre pour les partages de fichiers
+@description('Lifecycle-management rules. Left empty, no policy is created.')
+param managementPolicyRules array = []
 param defaultToOAuthAuthentication bool = false
 param deleteRetentionPolicy object = {}
 @allowed([ 'AzureDnsZone', 'Standard' ])
@@ -81,6 +83,15 @@ resource storage 'Microsoft.Storage/storageAccounts@2022-05-01' = {
         accessTier: contains(fileShare, 'accessTier') ? fileShare.accessTier : 'TransactionOptimized'
       }
     }]
+  }
+
+  resource managementPolicy 'managementPolicies' = if (!empty(managementPolicyRules)) {
+    name: 'default'
+    properties: {
+      policy: {
+        rules: managementPolicyRules
+      }
+    }
   }
 
   resource queueServices 'queueServices' = if (!empty(queues)) {

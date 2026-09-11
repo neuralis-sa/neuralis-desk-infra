@@ -35,6 +35,14 @@ case "$ENVIRONMENT" in
     *) echo "❌ Environnement inconnu : $ENVIRONMENT (production|staging)"; exit 1 ;;
 esac
 
+# L'identifiant de ressource publié par l'API (`MCP_RESOURCE_URL`) doit être un
+# URI d'ID d'application de cette inscription : c'est lui que le client transmet
+# à Entra comme indicateur de ressource, et Entra n'y rattache les portées
+# demandées que s'il connaît l'URI. Sinon l'autorisation échoue par
+# `AADSTS9010010`. Il exige un domaine vérifié dans le tenant — à défaut, le
+# script retombe sur le seul `api://<app-id>` et le dit.
+RESOURCE_URL="$PUBLIC_URL/api/mcp"
+
 API_APP_NAME="Neuralis Desk MCP${SUFFIX}"
 CLIENT_APP_NAME="Neuralis Desk MCP Client${SUFFIX}"
 
@@ -94,7 +102,7 @@ WRITE_ROLE_ID=$(or_new_uuid "$(read_role_id mcp.write)")
 # l'entreprise), là où une portée déléguée vaut pour tout le monde.
 cat > /tmp/mcp-api-manifest.json <<JSON
 {
-  "identifierUris": ["api://$API_APP_ID"],
+  "identifierUris": ["$RESOURCE_URL", "api://$API_APP_ID"],
   "api": {
     "requestedAccessTokenVersion": 2,
     "oauth2PermissionScopes": [
@@ -141,12 +149,30 @@ cat > /tmp/mcp-api-manifest.json <<JSON
 }
 JSON
 
-az rest --method PATCH \
-    --uri "$GRAPH/applications/$API_OBJECT_ID" \
-    --headers "Content-Type=application/json" \
-    --body @/tmp/mcp-api-manifest.json
-rm -f /tmp/mcp-api-manifest.json
-echo "✅ Portées mcp.read / mcp.write et audience api://$API_APP_ID"
+patch_api_app() {
+    az rest --method PATCH \
+        --uri "$GRAPH/applications/$API_OBJECT_ID" \
+        --headers "Content-Type=application/json" \
+        --body @/tmp/mcp-api-manifest.json
+}
+
+AUDIENCE="$RESOURCE_URL"
+if ! patch_api_app; then
+    # Presque toujours : « identifierUris must use a verified domain ». On ne
+    # bloque pas l'installation pour autant — les jetons statiques et Claude
+    # Code fonctionnent —, mais le connecteur claude.ai butera sur
+    # AADSTS9010010 tant que le domaine n'est pas vérifié.
+    echo "⚠️  L'URI $RESOURCE_URL a été refusé (domaine non vérifié dans le tenant ?)."
+    echo "    Nouvel essai avec le seul api://$API_APP_ID."
+    sed -i.bak "s|\"$RESOURCE_URL\", ||" /tmp/mcp-api-manifest.json
+    patch_api_app
+    AUDIENCE="api://$API_APP_ID"
+    echo "⚠️  Le connecteur claude.ai refusera l'autorisation (AADSTS9010010) tant"
+    echo "    que MCP_RESOURCE_URL ne sera pas un URI d'ID d'application : vérifier"
+    echo "    le domaine ${PUBLIC_URL#https://} dans Entra, puis relancer ce script."
+fi
+rm -f /tmp/mcp-api-manifest.json /tmp/mcp-api-manifest.json.bak
+echo "✅ Portées mcp.read / mcp.write et audience $AUDIENCE"
 
 # ==========================================================================
 # 2. L'application cliente : celle que Claude utilise
@@ -180,7 +206,7 @@ echo "Réglages de la Function App (déjà dans env/$ENVIRONMENT/appsettings.$EN
 echo "pour MCP_RESOURCE_URL ; les deux autres sont à y ajouter) :"
 echo ""
 echo "  MCP_OAUTH_ISSUER   = https://login.microsoftonline.com/$(az account show --query tenantId -o tsv)/v2.0"
-echo "  MCP_OAUTH_AUDIENCE = api://$API_APP_ID"
+echo "  MCP_OAUTH_AUDIENCE = $AUDIENCE"
 echo "  MCP_RESOURCE_URL   = $PUBLIC_URL/api/mcp"
 echo ""
 echo "Connecteur claude.ai — URL $PUBLIC_URL/api/mcp, client $CLIENT_APP_ID"

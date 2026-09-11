@@ -1,8 +1,22 @@
 {
   "navigationFallback": {
-    "rewrite": "/index.html"
+    "rewrite": "/index.html",
+    "exclude": ["/api/*", "/.auth/*", "/.well-known/*"]
   },
   "routes": [
+    {
+      "route": "/api/mcp",
+      "allowedRoles": ["anonymous"]
+    },
+    {
+      "route": "/api/.well-known/*",
+      "allowedRoles": ["anonymous"]
+    },
+    {
+      "route": "/.well-known/oauth-protected-resource",
+      "rewrite": "/api/.well-known/oauth-protected-resource",
+      "allowedRoles": ["anonymous"]
+    },
     {
       "route": "/api/public/*",
       "allowedRoles": ["anonymous"]

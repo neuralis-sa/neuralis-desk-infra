@@ -156,7 +156,9 @@ patch_api_app() {
         --body @/tmp/mcp-api-manifest.json
 }
 
-AUDIENCE="$RESOURCE_URL"
+# L'audience attendue dans `aud` n'est PAS l'URI : un jeton v2 (ce que nous
+# exigeons) porte l'identifiant d'application de l'API, un GUID.
+AUDIENCE="$API_APP_ID"
 if ! patch_api_app; then
     # Presque toujours : « identifierUris must use a verified domain ». On ne
     # bloque pas l'installation pour autant — les jetons statiques et Claude
@@ -166,7 +168,6 @@ if ! patch_api_app; then
     echo "    Nouvel essai avec le seul api://$API_APP_ID."
     sed -i.bak "s|\"$RESOURCE_URL\", ||" /tmp/mcp-api-manifest.json
     patch_api_app
-    AUDIENCE="api://$API_APP_ID"
     echo "⚠️  Le connecteur claude.ai refusera l'autorisation (AADSTS9010010) tant"
     echo "    que MCP_RESOURCE_URL ne sera pas un URI d'ID d'application : vérifier"
     echo "    le domaine ${PUBLIC_URL#https://} dans Entra, puis relancer ce script."

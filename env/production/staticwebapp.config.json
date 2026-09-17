@@ -9,6 +9,10 @@
       "allowedRoles": ["anonymous"]
     },
     {
+      "route": "/api/webhooks/*",
+      "allowedRoles": ["anonymous"]
+    },
+    {
       "route": "/api/mcp",
       "allowedRoles": ["anonymous"]
     },

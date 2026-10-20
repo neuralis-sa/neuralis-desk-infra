@@ -11,115 +11,95 @@ on:
           - production
         default: staging
 
-env:
-  ONEPASSWORD_VAULT: Azure-Infra-Secret
-  ONEPASSWORD_ENV_ITEM: "neuralis-desk-infra"
-  DEPLOYMENT_ENV: ${{ github.event.inputs.env }}
+# Aucun droit par défaut : chaque job déclare uniquement ce dont il a besoin
+permissions: {}
 
 jobs:
   provision-infrastructure:
     runs-on: ubuntu-latest
+    # Environnement GitHub : règles de protection (reviewers, branches) et secrets scopés par environnement
+    environment: ${{ inputs.env }}
+    concurrency:
+      group: provision-${{ inputs.env }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write # Azure OIDC
+    env:
+      ONEPASSWORD_VAULT: ${{ vars.ONEPASSWORD_VAULT || 'Azure-Infra-Secret' }}
+      ONEPASSWORD_ENV_ITEM: "neuralis-desk-infra"
+      DEPLOYMENT_ENV: ${{ inputs.env }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Configure 1Password CLI
-        uses: 1password/install-cli-action@v1
+        uses: 1password/install-cli-action@143a85f84a90555d121cde2ff5872e393a47ab9f # v1.0.0
 
-      - name: Sync azure credentials from 1Password
+      - name: Load azure credentials from 1Password
         id: load-azure-creds
-        run: |
-          ENV_REFERENCE="op://${{ env.ONEPASSWORD_VAULT }}/${{ env.ONEPASSWORD_ENV_ITEM }}.${{ env.DEPLOYMENT_ENV }}.azure/notesPlain"
-
-          echo "Syncing azure credentials from 1Password"
-
-          # Récupérer le fichier depuis 1Password
-          op read "$ENV_REFERENCE" > .azure-env.temp
-
-          # Parser et synchroniser chaque variable
-          while IFS='=' read -r key value; do
-            # Ignorer les lignes vides et les commentaires
-            if [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]]; then
-              continue
-            fi
-            
-            # Nettoyer la clé (supprimer les espaces)
-            key=$(echo "$key" | xargs)
-            
-            # Nettoyer la valeur (supprimer les guillemets si présents)
-            value=$(echo "$value" | sed 's/^["'\'']//' | sed 's/["'\'']$//')
-            
-            echo "Syncing $key"
-
-            echo "$key=$value" >> $GITHUB_OUTPUT
-
-          done < .azure-env.temp
-
-          # Nettoyer le fichier temporaire
-          rm -f .azure-env.temp
+        run: ./scripts/ci/load-op-env.sh "op://$ONEPASSWORD_VAULT/$ONEPASSWORD_ENV_ITEM.$DEPLOYMENT_ENV.azure/notesPlain"
         env:
           OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
 
       - name: Install Azure Developer CLI
-        uses: Azure/setup-azd@v2
+        uses: Azure/setup-azd@0b7e3a35ab00f2eee7080c845eb39c3f0ebfa553 # v2.4.0
 
       - name: Log in with Azure (azd)
         run: |
-          azd auth login `
-            --client-id "${{ env.AZURE_CLIENT_ID }}" `
-            --client-secret "${{ env.AZURE_CLIENT_SECRET }}" `
-            --tenant-id "${{ env.AZURE_TENANT_ID }}"
-        shell: pwsh
+          if [ -n "$AZURE_CLIENT_SECRET" ]; then
+            # Legacy : secret client, à supprimer une fois l'OIDC en place sur tous les environnements
+            azd auth login \
+              --client-id "$AZURE_CLIENT_ID" \
+              --client-secret "$AZURE_CLIENT_SECRET" \
+              --tenant-id "$AZURE_TENANT_ID"
+          else
+            # OIDC (identité fédérée) : utilisé dès que AZURE_CLIENT_SECRET est retiré de l'item 1Password
+            azd auth login \
+              --federated-credential-provider "github" \
+              --client-id "$AZURE_CLIENT_ID" \
+              --tenant-id "$AZURE_TENANT_ID"
+          fi
         env:
           AZURE_CLIENT_ID: ${{ steps.load-azure-creds.outputs.AZURE_CLIENT_ID }}
           AZURE_CLIENT_SECRET: ${{ steps.load-azure-creds.outputs.AZURE_CLIENT_SECRET }}
           AZURE_TENANT_ID: ${{ steps.load-azure-creds.outputs.AZURE_TENANT_ID }}
 
-      - name: Sync .env from 1Password
-        id: load-secrets
+      # Les secrets de provisioning ne sortent pas de ce step (ni $GITHUB_ENV, ni sorties de step)
+      - name: Azure Dev Provision
         run: |
-          ENV_REFERENCE="op://${{ env.ONEPASSWORD_VAULT }}/${{ env.ONEPASSWORD_ENV_ITEM }}.${{ env.DEPLOYMENT_ENV }}.provision/notesPlain"
+          ENV_REFERENCE="op://$ONEPASSWORD_VAULT/$ONEPASSWORD_ENV_ITEM.$DEPLOYMENT_ENV.provision/notesPlain"
 
-          echo "Syncing .env file from 1Password to .env"
-          echo "Key Vault: ${{ env.KEY_VAULT_NAME }}"
+          echo "Loading .env file from 1Password"
 
-          # Récupérer le fichier .env depuis 1Password
-          # Récupérer le fichier .env depuis 1Password
-          op read "$ENV_REFERENCE" > .env.temp
+          # Lecture en mémoire uniquement : aucun fichier temporaire sur le runner
+          CONTENT=$(op read "$ENV_REFERENCE")
+          # azd n'a pas besoin du jeton 1Password
+          unset OP_SERVICE_ACCOUNT_TOKEN
 
-          # Parser et synchroniser chaque variable
+          # Parser et exporter chaque variable : main.bicepparam les lit via readEnvironmentVariable()
           while IFS='=' read -r key value; do
             # Ignorer les lignes vides et les commentaires
             if [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]]; then
               continue
             fi
-            
+
             # Nettoyer la clé (supprimer les espaces)
             key=$(echo "$key" | xargs)
-            
+
             # Nettoyer la valeur (supprimer les guillemets si présents)
             value=$(echo "$value" | sed 's/^["'\'']//' | sed 's/["'\'']$//')
-            
-            echo "Syncing $key -> $secret_name"
 
-            echo "$key=$value" >> $GITHUB_OUTPUT
-            # Also export to the job environment so main.bicepparam's readEnvironmentVariable()
-            # picks up any new parameter without needing an entry in the step's env: block.
-            echo "$key=$value" >> $GITHUB_ENV
+            if [[ -n "$value" ]]; then
+              echo "::add-mask::$value"
+            fi
 
-          done < .env.temp
+            echo "Loaded $key"
+            export "$key=$value"
 
-          # Nettoyer le fichier temporaire
-          rm -f .env.temp
+          done <<< "$CONTENT"
+
+          azd provision --no-prompt
         env:
           OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-
-      - name: Azure Dev Provision
-        run: azd provision --no-prompt
-        env:
-          AZURE_ENV_NAME: ${{ steps.load-secrets.outputs.AZURE_ENV_NAME }}
-          AZURE_RESOURCE_TOKEN: ${{ steps.load-secrets.outputs.AZURE_RESOURCE_TOKEN }}
-          AZURE_LOCATION: ${{ steps.load-secrets.outputs.AZURE_LOCATION }}
-          AZURE_SUBSCRIPTION_ID: ${{ steps.load-secrets.outputs.AZURE_SUBSCRIPTION_ID }}
-          POSTGRESQL_ADMIN_PASSWORD: ${{ steps.load-secrets.outputs.POSTGRESQL_ADMIN_PASSWORD }}
-          AZURE_AUTH_CLIENT_SECRET: ${{ steps.load-secrets.outputs.AZURE_AUTH_CLIENT_SECRET }}
-          AZURE_AUTH_CLIENT_ID: ${{ steps.load-secrets.outputs.AZURE_AUTH_CLIENT_ID }}
